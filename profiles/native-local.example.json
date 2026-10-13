@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "client": {
+    "executable": "../../CODOL/codoMP_client_shipRetail.exe",
+    "sha256": "e3823fd6afc80fb25fa84747e6e9634707b9a0b189357a5466921cda354af37b",
+    "arguments": ["-q", "0", "-src=tgp", "-game_id", "29", "-zone_id", "83886082", "+set", "r_fullscreen", "0", "+set", "1011", "1", "+set", "3265", "12", "+set", "dw_autoStartGame", "0"],
+    "runner": null,
+    "wine_prefix": null
+  },
+  "backend": {
+    "executable": "../../server/target/release/codol-server",
+    "certificate": "../../server/.tools/tls-lab/server.pem",
+    "private_key": "../../server/.tools/tls-lab/key.pem",
+    "service_data_dir": "../../server/client-work/server-data",
+    "game_state": "../../server/research-output/tdm-afghan-hud-state.json",
+    "map_catalog": "../../server/research-output/native-tdm-map-catalog.json",
+    "title_id": 1002,
+    "ip": "127.0.0.1",
+    "auth_port": 39002,
+    "lobby_port": 39001,
+    "stun_port": 3074,
+    "stun_alt_port": 3078,
+    "game_port": 39004,
+    "resource_port": 39003
+  },
+  "state_dir": "../state/native",
+  "startup_timeout_seconds": 180,
+  "client_startup_timeout_seconds": 90
+}

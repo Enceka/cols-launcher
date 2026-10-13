@@ -1,4 +1,5 @@
 use crate::inspection;
+use crate::native::{self, LocalProfile};
 use crate::profile::{Profile, resolve};
 use crate::relay::Event;
 use crate::session;
@@ -20,6 +21,7 @@ struct App {
     server: String,
     auth_port: String,
     lobby_port: String,
+    native_mode: bool,
     status: String,
     report: String,
     log: String,
@@ -69,6 +71,7 @@ impl App {
             server: server.unwrap_or_default(),
             auth_port: auth_port.map(|p| p.to_string()).unwrap_or_default(),
             lobby_port: lobby_port.map(|p| p.to_string()).unwrap_or_default(),
+            native_mode: path.to_string_lossy().contains("native"),
             status: "先检查配置与客户端。".into(),
             report: String::new(),
             log: String::new(),
@@ -110,6 +113,23 @@ impl App {
     }
 
     fn check(&mut self) {
+        if self.native_mode {
+            match self
+                .local_profile()
+                .and_then(|profile| native::plan(&profile))
+            {
+                Ok(report) => {
+                    self.status = if report.launch_allowed {
+                        "本机原生前置检查通过，可启动。".into()
+                    } else {
+                        format!("无法启动：{}", report.blockers.join("；"))
+                    };
+                    self.report = serde_json::to_string_pretty(&report).unwrap_or_default();
+                }
+                Err(error) => self.status = format!("{error:#}"),
+            }
+            return;
+        }
         match self
             .profile()
             .and_then(|profile| inspection::inspect(&profile))
@@ -127,6 +147,10 @@ impl App {
     }
 
     fn launch(&mut self) {
+        if self.native_mode {
+            self.launch_native(false);
+            return;
+        }
         let profile = match self.profile().and_then(|profile| {
             let report = inspection::inspect(&profile)?;
             anyhow::ensure!(report.launch_allowed, "{}", report.blockers.join("；"));
@@ -153,6 +177,64 @@ impl App {
                     runtime
                         .block_on(session::run_session(&profile, receiver, emit))
                         .map(|_| ())
+                });
+            let _ = sender.send(Message::Finished(
+                result.map_err(|error| format!("{error:#}")),
+            ));
+        }));
+    }
+
+    fn local_profile(&mut self) -> Result<LocalProfile> {
+        let mut profile = LocalProfile::load(&PathBuf::from(&self.config))?;
+        if self.executable.trim().is_empty() {
+            self.executable = profile.client.executable.display().to_string();
+        } else {
+            profile.client.executable = resolve(
+                &PathBuf::from(self.executable.trim()),
+                &std::env::current_dir()?,
+            )?;
+            profile.validate()?;
+        }
+        Ok(profile)
+    }
+
+    fn launch_native(&mut self, recover: bool) {
+        let profile = match self.local_profile().and_then(|profile| {
+            if !recover {
+                let report = native::plan(&profile)?;
+                anyhow::ensure!(report.launch_allowed, "{}", report.blockers.join("；"));
+            }
+            Ok(profile)
+        }) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.status = format!("{error:#}");
+                return;
+            }
+        };
+        let (stop, receiver) = watch::channel(false);
+        self.stop = Some(stop);
+        self.status = if recover {
+            "正在恢复…".into()
+        } else {
+            "正在启动本机原生游戏…".into()
+        };
+        let sender = self.sender.clone();
+        self.worker = Some(std::thread::spawn(move || {
+            let logs = sender.clone();
+            let emit: Event = Arc::new(move |message| {
+                let _ = logs.send(Message::Log(message.into()));
+            });
+            let result = tokio::runtime::Runtime::new()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    if recover {
+                        runtime.block_on(native::recover(&profile))
+                    } else {
+                        runtime
+                            .block_on(native::run(&profile, receiver, emit))
+                            .map(|_| ())
+                    }
                 });
             let _ = sender.send(Message::Finished(
                 result.map_err(|error| format!("{error:#}")),
@@ -201,7 +283,18 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("COLS启动器");
-            ui.label("本地客户端 · 只读检查 · TCP 转发");
+            ui.add_enabled_ui(!running, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.selectable_value(&mut self.native_mode, true, "本机原生游戏").changed() {
+                        self.config = "profiles/native.local.json".into(); self.executable.clear();
+                    }
+                    if ui.selectable_value(&mut self.native_mode, false, "连接转发").changed() {
+                        self.config = "profiles/multiplayer.example.json".into(); self.executable.clear();
+                    }
+                });
+            });
+            ui.label(if self.native_mode { "保留原生画面与玩法 · 本地服务端 · 会话结束自动恢复配置" }
+                else { "本地客户端 · 只读检查 · TCP 转发" });
             ui.add_space(12.0);
             ui.add_enabled_ui(!running, |ui| {
                 ui.label("配置 JSON（可拖入文件；修改配置路径后重新检查）");
@@ -210,6 +303,15 @@ impl eframe::App for App {
                 }
                 ui.label("客户端路径（可拖入原生可执行文件）");
                 ui.text_edit_singleline(&mut self.executable);
+                if self.native_mode {
+                    ui.label("本机使用配置中的回环地址。连接 INI 和本地 CA 会临时调整，EXE/DLL/游戏资源不变。");
+                    if ui.button("生成本机配置").clicked() {
+                        match native::initialize(&PathBuf::from(&self.config), None) {
+                            Ok(path) => self.status = format!("已生成 {}", path.display()),
+                            Err(error) => self.status = format!("{error:#}"),
+                        }
+                    }
+                } else {
                 ui.label("联机服务器 IP / 域名（留空沿用配置）");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.server)
@@ -229,6 +331,7 @@ impl eframe::App for App {
                             .hint_text("沿用配置"),
                     );
                 });
+                }
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -239,12 +342,12 @@ impl eframe::App for App {
                     self.check();
                 }
                 if ui
-                    .add_enabled(!running, egui::Button::new("启动客户端"))
+                    .add_enabled(!running, egui::Button::new(if self.native_mode { "启动本机游戏" } else { "启动客户端" }))
                     .clicked()
                 {
                     self.launch();
                 }
-                if ui
+                if !self.native_mode && ui
                     .add_enabled(!running, egui::Button::new("保存联机配置"))
                     .clicked()
                 {
@@ -255,6 +358,9 @@ impl eframe::App for App {
                         }
                         Err(error) => self.status = format!("{error:#}"),
                     }
+                }
+                if self.native_mode && ui.add_enabled(!running, egui::Button::new("恢复上次配置")).clicked() {
+                    self.launch_native(true);
                 }
                 if ui
                     .add_enabled(running, egui::Button::new("结束本次会话"))
@@ -282,7 +388,8 @@ impl eframe::App for App {
                         .desired_rows(12)
                         .interactive(false),
                 );
-                ui.label("外部请求拦截尚未实现；TCP 转发不改变 TLS 校验，也不转发游戏 UDP。");
+                ui.label(if self.native_mode { "使用原生客户端连接本地服务端。启动器不打包客户端或游戏资源。" }
+                    else { "外部请求拦截尚未实现；TCP 转发不改变 TLS 校验，也不转发游戏 UDP。" });
             });
         });
         context.request_repaint_after(std::time::Duration::from_millis(100));

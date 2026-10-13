@@ -1,7 +1,7 @@
-use codol_launcher::inspection::{inspect, inventory, sha256};
-use codol_launcher::profile::{Endpoint, Profile, Route, Routing};
-use codol_launcher::relay::{Event, RelayGroup};
-use codol_launcher::session::run_session;
+use cols_launcher::inspection::{inspect, inventory, sha256};
+use cols_launcher::profile::{Endpoint, Profile, Route, Routing};
+use cols_launcher::relay::{Event, RelayGroup};
+use cols_launcher::session::run_session;
 use serde_json::{Value, json};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;

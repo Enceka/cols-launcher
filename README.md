@@ -1,8 +1,8 @@
 # COLS 启动器
 
-独立于 `COLS` 的 Rust 工程，提供 egui 原生窗口、只读检查、启动参数预览、客户端启动和本地 TCP 字节转发。运行时不依赖 Python。不包含游戏程序、资源、补丁、注入模块或原启动器代码。
+独立于 `COLS` 的 Rust 启动器，接入用户本地的原生客户端，保留原生画面和玩法。提供本地服务端管理、原生程序启动、连接配置与本地 CA 的临时调整及恢复。运行时不依赖 Python，不包含游戏程序、资源、补丁、注入模块或原启动器代码。
 
-**WFP 请求拦截尚未实现，未经配置变更的原生 CODOL 登录尚未验证。** TCP 转发器可以运行，但连接必须已指向监听端口，或由外部适配器送到监听端口。TLS 验证仍由客户端执行。设计与实际证据见 [docs/DESIGN.md](docs/DESIGN.md)。
+本机原生模式保持 EXE、DLL 和游戏资源不变，允许临时调整连接 INI 和附加本地 CA，退出后恢复。WFP 请求拦截及公网联机尚未实现；原有 TCP 转发模式仍可单独使用。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 构建与运行
 
@@ -10,7 +10,7 @@
 
 ```sh
 cargo build --locked --release
-cargo run --locked -- gui --config profiles/codol3333.example.json
+cargo run --locked -- gui
 cargo run --locked -- plan --config profiles/codol3333.example.json
 cargo test --locked --no-default-features
 ```
@@ -21,7 +21,40 @@ cargo test --locked --no-default-features
 sh tools/cargo.sh run --locked -- gui --config profiles/codol3333.example.json
 ```
 
-构建出的原生程序是 `target/release/codol-launcher`，Windows 为 `codol-launcher.exe`。构建和运行分开；运行不需要安装 Rust。GUI 支持输入或拖入配置 JSON 和客户端程序路径；中文字体从本机系统读取，不打包游戏字体。
+构建出的程序是 `target/release/cols-launcher`，Windows 为 `cols-launcher.exe`。运行不需要安装 Rust。GUI 提供“本机原生游戏”和“连接转发”，支持输入或拖入配置 JSON 和程序路径；中文字体从本机系统读取，不打包游戏字体。
+
+## 本机原生游戏
+
+工作区需要用户自行提供的 `CODOL/` 客户端、已构建的 `server/target/release/codol-server`、本地证书/私钥、服务资料以及已准备的地图状态和目录。启动器不自动下载客户端或地图资源，不调用 `play.py` / `gamehub_run.py`。已有资料的准备要求见服务端的本地游玩文档。
+
+在本仓库中：
+
+```sh
+sh tools/cargo.sh build --release --locked
+target/release/cols-launcher native-init --workspace ..
+target/release/cols-launcher native-plan
+target/release/cols-launcher native-launch
+```
+
+可用 `native-launch --seconds 90` 做有时限的启动验证，默认持续到游戏退出。时限从启动流程开始计算，包含地图加载和客户端启动。
+
+`native-init` 生成 `profiles/native.local.json`，不覆盖已有配置；路径指向指定工作区。在 macOS 上会读取已有 GameHub Wine10 安装信息和现有游玩 prefix，不安装或重建运行环境。Windows 直接启动 EXE，服务端路径须对应自己的 Windows 构建；其它 Wine 环境可在 JSON 中配置。GUI 的“生成本机配置”提供同样操作。
+
+`native-plan` 只检查文件、基线、服务资料和原生进程占用；不启动服务、不连接网络、不修改客户端。如果已有游戏运行，会明确拒绝再次启动。`native-launch` 管理本次 AUTH、LOBBY、STUN、游戏 UDP 和 IIPS 资源观察端点；等到服务端报告地图与各端点就绪才临时配置并启动原生程序。
+
+启动前备份 `dwauth.ini`、`stun.ini`、`iips.ini`、`cacert.pem` 和 `IIPS/cacert.pem`，只把配置中指定的本地证书追加到客户端 CA bundle，不关闭验证、不导入系统信任库。游戏结束、Ctrl-C 或窗口关闭后，停止本次进程并恢复原文件；原来不存在的文件会删除。不会回滚游戏自己的存档、玩家设置或正常服务器资料。
+
+按原生入口进入：玩 → 多人竞技 → 创建房间 → 战术团队竞技，选择已准备地图并准备，服务端模拟的 Bot 加入。本机使用现有账号资料，地图和玩法范围由服务端准备决定。
+
+异常中断后：
+
+```sh
+target/release/cols-launcher native-recover
+```
+
+恢复依据外部 `state_dir` 中的持久化记录与备份，验证进程 PID、创建时间及程序路径。活跃的原启动器会话不能被恢复命令抢占；外部改动过的配置保留备份并拒绝覆盖。若异常发生在分离式 Wine 程序刚启动而尚未记录真实 PID 的窗口，需先退出该游戏，再恢复。不要删除待恢复记录或手动覆盖备份。
+
+本地管理已用合成原生程序验证启动、分离式包装器、就绪、失败、取消、配置恢复及占用保护，并与本机真实 Rust 服务端完成独立端口和服务资料下的就绪、进程管理与恢复验证。完整原生登录与对局尚未通过本启动器验收；已有游戏运行时会停止于占用检查。
 
 `plan` / `inspect` 不启动客户端、不连接上游、不创建状态文件。外部拦截示例会显示尚未实现的阻塞，返回码为 2。复制示例为 `profiles/research.local.json`，调整路径后运行 `launch --config profiles/research.local.json`。
 
@@ -41,7 +74,7 @@ cargo run --locked -- launch --config profiles/multiplayer.example.json --server
 
 这些设置选择 TCP 上游，不能替代尚未完成的原始连接拦截。玩家联机还需服务端对外监听，并向客户端通告可达的游戏/STUN 地址；转发认证和大厅不等于 UDP 对局已连通。当前服务端的示例绑定多为回环地址，不能直接作为公网联机配置。
 
-Windows 直接启动用户提供的 EXE。macOS/Linux 使用已有 Wine 时，配置 `client.runner` 为 Wine 程序绝对路径，`wine_prefix` 为已有且位于客户端目录外的 prefix。启动器不安装 Wine、不创建 prefix。v0 只追踪并停止直接启动的进程，不支持启动后立即退出的分离式包装器，不保证停止所有 Wine 原生子进程。
+Windows 直接启动用户提供的 EXE。macOS/Linux 配置现有 Wine 路径和位于客户端目录外的 prefix，启动器不安装 Wine、不创建 prefix。转发模式只追踪直接启动的进程；本机原生模式会识别真实游戏 PID，支持正常退出的启动包装器。不保证停止所有 Wine 原生子组件。
 
 ## 连接模式
 
@@ -65,9 +98,9 @@ Ctrl-C 关闭。此命令不启动客户端，也不截获其他连接。只监�
 
 ## 文件和会话
 
-启动器仅写客户端目录之外的 `state_dir`：会话 JSON、最多 256 KiB 的连接元数据日志和锁。同一状态目录下，同一个客户端不能同时启动两次；第三方启动器及不同状态目录不在锁覆盖范围内。不按名称批量结束其他进程。
+转发模式仅写外部 `state_dir`，连接元数据日志最多 256 KiB。本机原生模式另外临时调整上述五个配置/CA 文件，使用跨状态目录的客户端锁；若已有研究工具的共享锁，也会获取该锁。原生进程占用检查在修改配置前执行，不按程序名称批量结束其他进程。
 
-启动前后核对 EXE、连接配置、CA 文件及少量 DLL；范围见 `src/inspection.rs`，不涵盖全部资源。差异记入会话记录，不自动回滚。客户端自己的存档、日志和更新仍由客户端决定；启动器不改写文件，不代表原程序运行时不会写盘。
+启动前后核对 EXE、连接配置、CA 文件及少量 DLL；范围见 `src/inspection.rs`，不涵盖全部资源。只恢复启动器临时配置的五个文件；EXE/DLL/资源没有修改入口。客户端自己的存档、日志和更新仍由客户端决定。
 
 测试使用合成文件和本项目自己的测试程序，不需要商业游戏资源。覆盖大数据双向转发、半关闭、端口绑定失败、上游不可达、停止清理、摘要、目录隔离及重复会话。Windows、Wine、真实游戏登录及 UDP 对局尚未实机验收。
 
@@ -75,4 +108,4 @@ Ctrl-C 关闭。此命令不启动客户端，也不截获其他连接。只监�
 
 按用户确定的范围，仅提供服务端和启动器。客户端及资源由用户自行合法取得；不提供资源下载、自动补丁或客户端更新。启动器代码采用 [MIT License](LICENSE)，授权范围不包含原游戏程序或资源。本项目无官方关联或背书。
 
-重写客户端并读取用户本地资源是尚未实施的替代方向。服务端政策见相邻仓库 [LEGAL.md](https://github.com/Enceka/cols/blob/main/LEGAL.md)；启动器自身发行以本文件和 LICENSE 为准，不依赖相邻目录存在。
+本项目采用原生客户端接入路线，不实现游戏引擎。服务端政策见 [LEGAL.md](https://github.com/Enceka/cols/blob/main/LEGAL.md)；启动器自身发行以本文件和 LICENSE 为准。

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use codol_launcher::{inspection, profile::Profile, relay::RelayGroup, session};
+use cols_launcher::{inspection, native, profile::Profile, relay::RelayGroup, session};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -12,6 +12,10 @@ enum Action {
     Launch,
     Relay,
     Gui,
+    NativeInit,
+    NativePlan,
+    NativeLaunch,
+    NativeRecover,
 }
 
 #[derive(Parser)]
@@ -19,14 +23,21 @@ enum Action {
 struct Cli {
     #[arg(value_enum)]
     action: Action,
-    #[arg(long, default_value = "profiles/codol3333.example.json")]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "native-init 使用的本机工作区（包含 CODOL 和 server 目录）"
+    )]
+    workspace: Option<PathBuf>,
     #[arg(long, help = "指定上游服务器 IP 或域名，不改写客户端文件")]
     server: Option<String>,
     #[arg(long)]
     auth_port: Option<u16>,
     #[arg(long)]
     lobby_port: Option<u16>,
+    #[arg(long, help = "本机原生验证的可选运行时限，默认运行到游戏退出", value_parser = clap::value_parser!(u64).range(1..=3600))]
+    seconds: Option<u64>,
 }
 
 async fn interrupted() -> Result<()> {
@@ -43,16 +54,77 @@ async fn interrupted() -> Result<()> {
 
 fn run() -> Result<bool> {
     let cli = Cli::parse();
+    anyhow::ensure!(
+        cli.seconds.is_none() || matches!(cli.action, Action::NativeLaunch),
+        "--seconds 仅用于 native-launch"
+    );
+    let native_mode = matches!(
+        cli.action,
+        Action::NativeInit | Action::NativePlan | Action::NativeLaunch | Action::NativeRecover
+    );
+    let config = cli.config.unwrap_or_else(|| {
+        PathBuf::from(if native_mode || matches!(cli.action, Action::Gui) {
+            "profiles/native.local.json"
+        } else {
+            "profiles/codol3333.example.json"
+        })
+    });
+    if matches!(cli.action, Action::NativeInit) {
+        let path = native::initialize(&config, cli.workspace.as_deref())?;
+        println!("已生成本机原生配置：{}", path.display());
+        return Ok(true);
+    }
     if matches!(cli.action, Action::Gui) {
         #[cfg(feature = "gui")]
         {
-            codol_launcher::gui::open(cli.config, cli.server, cli.auth_port, cli.lobby_port)?;
+            cols_launcher::gui::open(config, cli.server, cli.auth_port, cli.lobby_port)?;
             return Ok(true);
         }
         #[cfg(not(feature = "gui"))]
         anyhow::bail!("GUI 未编译；请去掉 --no-default-features 后重新构建");
     }
-    let mut profile = Profile::load(&cli.config)?;
+    if native_mode {
+        anyhow::ensure!(
+            cli.server.is_none() && cli.auth_port.is_none() && cli.lobby_port.is_none(),
+            "本地原生模式使用配置中的回环端点；远端选项用于转发模式"
+        );
+        let profile = native::LocalProfile::load(&config)?;
+        if matches!(cli.action, Action::NativePlan) {
+            let report = native::plan(&profile)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(report.launch_allowed);
+        }
+        return tokio::runtime::Runtime::new()?.block_on(async {
+            if matches!(cli.action, Action::NativeRecover) {
+                native::recover(&profile).await?;
+                println!("本地原生配置已恢复。");
+            } else {
+                let (stop, receiver) = watch::channel(false);
+                let mut running = Box::pin(native::run(
+                    &profile,
+                    receiver,
+                    Arc::new(|message| println!("{message}")),
+                ));
+                tokio::select! {
+                    result = &mut running => { result?; },
+                    result = interrupted() => {
+                        stop.send_replace(true);
+                        running.await?;
+                        result?;
+                    },
+                    _ = async {
+                        if let Some(seconds) = cli.seconds { tokio::time::sleep(std::time::Duration::from_secs(seconds)).await; }
+                        else { std::future::pending::<()>().await; }
+                    } => {
+                        stop.send_replace(true);
+                        running.await?;
+                    },
+                }
+            }
+            Ok(true)
+        });
+    }
+    let mut profile = Profile::load(&config)?;
     profile.set_server(cli.server.as_deref(), cli.auth_port, cli.lobby_port)?;
     if matches!(cli.action, Action::Inspect | Action::Plan) {
         let report = inspection::inspect(&profile)?;
@@ -60,7 +132,7 @@ fn run() -> Result<bool> {
         return Ok(report.launch_allowed);
     }
     tokio::runtime::Runtime::new()?.block_on(async {
-        let emit: codol_launcher::relay::Event = Arc::new(|message| println!("{message}"));
+        let emit: cols_launcher::relay::Event = Arc::new(|message| println!("{message}"));
         if matches!(cli.action, Action::Relay) {
             let mut relays = RelayGroup::start(&profile.routes, emit).await?;
             println!("仅运行 TCP 转发；未截获其他进程请求，也未启动客户端。");
