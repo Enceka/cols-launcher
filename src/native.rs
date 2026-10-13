@@ -7,13 +7,13 @@ use crate::relay::Event;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -46,6 +46,8 @@ pub struct LocalProfile {
     pub state_dir: PathBuf,
     pub startup_timeout_seconds: u64,
     pub client_startup_timeout_seconds: u64,
+    #[serde(default)]
+    pub trace_wine_files: bool,
     #[serde(skip)]
     pub source: PathBuf,
 }
@@ -339,15 +341,11 @@ impl Service {
         if self.child.try_wait()?.is_none() {
             self.child.start_kill()?;
         }
-        self.child.wait().await?;
+        let waited = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
         for reader in self.readers.drain(..) {
-            if tokio::time::timeout(Duration::from_secs(1), reader)
-                .await
-                .is_err()
-            {
-                break;
-            }
+            reader.abort();
         }
+        waited.context("服务进程仍在系统退出等待中")??;
         result
     }
 }
@@ -378,6 +376,31 @@ fn read_output<T: tokio::io::AsyncRead + Unpin + Send + 'static>(
             ] {
                 if line.contains(message) {
                     let _ = ready.send(message.into());
+                }
+            }
+        }
+    })
+}
+
+fn capture_client_output<T: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut stream: T,
+    log: Arc<Mutex<(File, usize)>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = [0_u8; 8192];
+        while let Ok(count) = stream.read(&mut buffer).await {
+            if count == 0 {
+                break;
+            }
+            if let Ok(mut log) = log.lock() {
+                if log.1 + count > 4 * 1024 * 1024 {
+                    if log.0.set_len(0).is_err() || log.0.rewind().is_err() {
+                        continue;
+                    }
+                    log.1 = 0;
+                }
+                if log.0.write_all(&buffer[..count]).is_ok() {
+                    log.1 += count;
                 }
             }
         }
@@ -482,6 +505,7 @@ pub struct LocalSession {
     pub backend_ready: bool,
     pub configs_restored: bool,
     pub error: Option<String>,
+    pub wine_runtime: Option<crate::wine::RecoveryReport>,
 }
 
 pub async fn run(
@@ -521,6 +545,7 @@ pub async fn run(
         backend_ready: false,
         configs_restored: false,
         error: None,
+        wine_runtime: None,
     };
     let changes = profile.changes()?;
     let mut journal = Journal::prepare(profile.root(), &profile.state_dir, &output, &changes)?;
@@ -530,7 +555,11 @@ pub async fn run(
     let mut wrapper: Option<Child> = None;
     let mut wrapper_pid = None;
     let mut game: Option<Identity> = None;
+    let mut wine = None;
+    let mut client_readers = Vec::new();
     let result: Result<()> = async {
+        wine = crate::wine::Runtime::prepare(&profile.client, &output, &emit).await?;
+        record.wine_runtime = wine.as_ref().map(|runtime| runtime.report.clone());
         emit("启动本地服务端，等待地图与网络端点就绪…");
         for command in [backend_command(profile, &output), resource_command(profile, &output)?] {
             let service = Service::spawn(command, sender.clone(), log.clone()).await?;
@@ -546,9 +575,14 @@ pub async fn run(
         let client = &profile.client;
         let mut command = Command::new(client.runner.as_ref().unwrap_or(&client.executable));
         if client.runner.is_some() { command.arg(&client.executable); }
-        command.args(&client.arguments).current_dir(profile.root()).kill_on_drop(true).stdout(Stdio::null()).stderr(Stdio::null());
-        if let Some(prefix) = &client.wine_prefix { command.env("WINEPREFIX", prefix).env("WINEDEBUG", "-all"); }
+        command.args(&client.arguments).current_dir(profile.root()).kill_on_drop(true).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(prefix) = &client.wine_prefix {
+            command.env("WINEPREFIX", prefix).env("WINEDEBUG", if profile.trace_wine_files { "-all,err+all,+timestamp,+file" } else { "-all,err+all" });
+        }
         wrapper = Some(command.spawn()?);
+        let client_log = Arc::new(Mutex::new((File::create(output.join("client.log"))?, 0)));
+        if let Some(stdout) = wrapper.as_mut().unwrap().stdout.take() { client_readers.push(capture_client_output(stdout, client_log.clone())); }
+        if let Some(stderr) = wrapper.as_mut().unwrap().stderr.take() { client_readers.push(capture_client_output(stderr, client_log)); }
         wrapper_pid = wrapper.as_ref().and_then(Child::id);
         if let Ok(identity) = Identity::from_pid(wrapper.as_ref().and_then(Child::id).context("缺少启动进程 PID")?) {
             journal.processes.push(identity);
@@ -556,6 +590,7 @@ pub async fn run(
         }
         let until = Instant::now() + Duration::from_secs(profile.client_startup_timeout_seconds);
         while game.is_none() {
+            if let Some(runtime) = wine.as_mut() { runtime.observe_server()?; }
             game = client_process(&client.executable, client.wine_prefix.as_deref());
             if game.is_some() { break; }
             if let Some(status) = wrapper.as_mut().unwrap().try_wait()? { ensure!(status.success(), "原生启动程序失败：{status}"); }
@@ -581,6 +616,11 @@ pub async fn run(
     }.await;
     // Stop our own processes before restoring files read by the native client.
     let mut cleanup_errors = Vec::new();
+    if let Some(runtime) = wine.as_mut()
+        && let Err(error) = runtime.shutdown().await
+    {
+        cleanup_errors.push(error.to_string());
+    }
     if let Some(identity) = &game
         && let Err(error) = identity.stop(false).await
     {
@@ -590,7 +630,15 @@ pub async fn run(
         if wrapper.try_wait()?.is_none() {
             let _ = wrapper.start_kill();
         }
-        let _ = wrapper.wait().await;
+        if tokio::time::timeout(Duration::from_secs(5), wrapper.wait())
+            .await
+            .is_err()
+        {
+            cleanup_errors.push("客户端仍在系统退出等待中，未无限等待该进程".into());
+        }
+    }
+    for reader in client_readers {
+        reader.abort();
     }
     for service in &mut services {
         if let Err(error) = service.stop().await {

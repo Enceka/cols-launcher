@@ -96,6 +96,15 @@ impl Identity {
             {
                 process.kill();
             }
+            let until = Instant::now() + Duration::from_secs(1);
+            while self.alive() && Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            ensure!(
+                !self.alive(),
+                "进程 {} 仍在系统等待中，终止尚未完成",
+                self.pid
+            );
         }
         Ok(())
     }

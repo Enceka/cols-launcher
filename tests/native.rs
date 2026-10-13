@@ -159,6 +159,7 @@ impl Fixture {
             state_dir: state,
             startup_timeout_seconds: 2,
             client_startup_timeout_seconds: 2,
+            trace_wine_files: false,
             source: base.join("native.json"),
         };
         profile.save(&profile.source).unwrap();
@@ -321,6 +322,30 @@ async fn waits_for_every_backend_then_launches_native_and_restores() {
         std::net::TcpListener::bind(fixture.profile.address(fixture.profile.backend.auth_port))
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn verbose_native_output_is_drained_and_bounded_without_blocking_cleanup() {
+    let mut fixture = Fixture::new();
+    fixture.profile.client.arguments.push("noisy".into());
+    let (_stop, receiver) = watch::channel(false);
+    let record = tokio::time::timeout(
+        Duration::from_secs(10),
+        native::run(&fixture.profile, receiver, Arc::new(|_| {})),
+    )
+    .await
+    .expect("client output must not block the session")
+    .unwrap();
+    assert!(record.configs_restored && record.changed_files.is_empty());
+    assert!(fixture.marker.is_file());
+    let output = std::fs::read_dir(&fixture.profile.state_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("client.log"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let bytes = std::fs::read(output).unwrap();
+    assert!(!bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024);
+    assert!(String::from_utf8_lossy(&bytes).contains("native-output-drained"));
 }
 
 #[tokio::test]

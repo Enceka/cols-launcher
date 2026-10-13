@@ -14,6 +14,15 @@ fn main() {
     };
     match action.as_str() {
         "fixture-client" => {
+            if arguments.get(3).is_some_and(|value| value == "noisy") {
+                use std::io::Write;
+                let buffer = [b'x'; 8192];
+                for _ in 0..640 {
+                    std::io::stdout().write_all(&buffer).unwrap();
+                    std::io::stderr().write_all(&buffer).unwrap();
+                }
+                eprintln!("native-output-drained");
+            }
             std::fs::write(&arguments[1], b"synthetic native client started").unwrap();
             std::thread::sleep(Duration::from_millis(arguments[2].parse().unwrap()));
         }

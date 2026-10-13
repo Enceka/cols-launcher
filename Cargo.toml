@@ -24,5 +24,8 @@ eframe = { version = "=0.33.3", default-features = false, features = ["default_f
 [dev-dependencies]
 tempfile = "3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.30", features = ["fs", "user"] }
+
 [lints.rust]
 unsafe_code = "forbid"
