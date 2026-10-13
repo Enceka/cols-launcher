@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "client": {
+    "executable": "../../CODOL/codoMP_client_shipRetail.exe",
+    "sha256": "e3823fd6afc80fb25fa84747e6e9634707b9a0b189357a5466921cda354af37b",
+    "arguments": ["-q", "0", "-src=tgp", "-game_id", "29", "-zone_id", "83886082"],
+    "runner": null,
+    "wine_prefix": null
+  },
+  "routing": "existing-config",
+  "routes": [
+    {"name": "lobby", "listen": {"host": "127.0.0.1", "port": 39001}, "upstream": {"host": "game.example.com", "port": 39001}},
+    {"name": "auth", "listen": {"host": "127.0.0.1", "port": 39002}, "upstream": {"host": "game.example.com", "port": 39002}}
+  ],
+  "state_dir": "../state"
+}

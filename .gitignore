@@ -1,0 +1,11 @@
+/target/
+.DS_Store
+state/
+profiles/*.local.json
+dist/
+build/
+*.exe
+*.dll
+*.ifs
+*.pem
+*.key
