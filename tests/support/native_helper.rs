@@ -7,6 +7,18 @@ fn option(arguments: &[String], flag: &str) -> String {
     arguments[index + 1].clone()
 }
 
+fn publish_ready(arguments: &[String], body: &str, digest: &str, mode: &str) {
+    let pid = std::process::id() + u32::from(mode == "wrong-pid");
+    let version = if mode == "wrong-version" { 2 } else { 1 };
+    let digest = if mode == "wrong-client" { "unsupported-client" } else { digest };
+    let path = std::path::PathBuf::from(option(arguments, "--launcher-ready-file"));
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, format!(
+        "{{\"schema_version\":{version},\"pid\":{pid},\"client_sha256\":\"{digest}\",{body}}}"
+    )).unwrap();
+    std::fs::rename(temporary, path).unwrap();
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let Some(action) = arguments.first() else {
@@ -28,7 +40,8 @@ fn main() {
         }
         "fixture-fail" => std::process::exit(7),
         "serve-auth" => {
-            let mode = std::fs::read_to_string(option(&arguments, "--game-state")).unwrap();
+            let state_path = std::path::PathBuf::from(option(&arguments, "--game-state"));
+            let mode = std::fs::read_to_string(&state_path).unwrap();
             if mode == "exit" {
                 std::process::exit(3);
             }
@@ -43,10 +56,22 @@ fn main() {
             if mode != "not-ready" {
                 println!("experimental Rust game UDP endpoint ready");
             }
+            if mode != "not-ready" && mode != "logs-only" {
+                let digest = std::fs::read_to_string(state_path.parent().unwrap().join("client-sha256")).unwrap();
+                let game = if mode == "wrong-endpoint" { "127.0.0.1:1".into() } else { option(&arguments, "--game-bind") };
+                let protocol = if mode == "wrong-protocol" { 4 } else { 3 };
+                let loaded = mode != "missing-maps";
+                let body = format!(
+                    "\"kind\":\"native_services\",\"lobby_protocol\":210,\"game_protocol\":{protocol},\"title_id\":{},\"auth\":\"{}\",\"lobby\":\"{}\",\"stun\":\"{}\",\"stun_alt\":\"{}\",\"game\":\"{}\",\"continuous_play\":true,\"native_bot_rooms\":true,\"game_state_loaded\":true,\"map_catalog_loaded\":{loaded}",
+                    option(&arguments,"--local-title-id"),option(&arguments,"--bind"),option(&arguments,"--lobby-bind"),option(&arguments,"--stun-bind"),option(&arguments,"--stun-alt"),game
+                );
+                publish_ready(&arguments, &body, &digest, &mode);
+            }
             std::thread::sleep(Duration::from_secs(60));
         }
         "observe" => {
-            let config = std::fs::read_to_string(option(&arguments, "--config")).unwrap();
+            let config_path = std::path::PathBuf::from(option(&arguments, "--config"));
+            let config = std::fs::read_to_string(&config_path).unwrap();
             let address = config
                 .lines()
                 .find_map(|line| line.strip_prefix("bind = "))
@@ -54,6 +79,8 @@ fn main() {
                 .trim_matches('"');
             let _listener = TcpListener::bind(address).unwrap();
             println!("TCP listener ready");
+            let digest = std::fs::read_to_string(config_path.parent().unwrap().parent().unwrap().parent().unwrap().join("client-sha256")).unwrap();
+            publish_ready(&arguments, &format!("\"kind\":\"tcp_observer\",\"listeners\":{{\"resources\":\"{address}\"}}"), &digest, "ready");
             std::thread::sleep(Duration::from_secs(60));
         }
         path if std::path::Path::new(path).is_file() => {

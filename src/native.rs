@@ -1,6 +1,7 @@
 //! Local original-client orchestration: prepare, wait, launch and restore.
 use crate::inspection::{Inventory, inspect, inventory};
 use crate::native_files::{ClientLocks, Journal, journal_path};
+use crate::native_readiness::{self, Kind};
 use crate::process::{Identity, client_process};
 use crate::profile::{Client, Profile, Routing, resolve};
 use crate::relay::Event;
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -306,12 +307,16 @@ struct Service {
     child: Child,
     identity: Identity,
     readers: Vec<JoinHandle<()>>,
+    ready_path: PathBuf,
+    kind: Kind,
+    ready: bool,
 }
 
 impl Service {
     async fn spawn(
         mut command: Command,
-        ready: mpsc::UnboundedSender<String>,
+        ready_path: PathBuf,
+        kind: Kind,
         log: Arc<Mutex<(File, usize)>>,
     ) -> Result<Self> {
         command
@@ -324,15 +329,18 @@ impl Service {
         let identity = Identity::from_pid(child.id().context("服务端进程没有 PID")?)?;
         let mut readers = Vec::new();
         if let Some(stdout) = child.stdout.take() {
-            readers.push(read_output(stdout, ready.clone(), log.clone()));
+            readers.push(read_output(stdout, log.clone()));
         }
         if let Some(stderr) = child.stderr.take() {
-            readers.push(read_output(stderr, ready, log));
+            readers.push(read_output(stderr, log));
         }
         Ok(Self {
             child,
             identity,
             readers,
+            ready_path,
+            kind,
+            ready: false,
         })
     }
 
@@ -352,7 +360,6 @@ impl Service {
 
 fn read_output<T: tokio::io::AsyncRead + Unpin + Send + 'static>(
     stream: T,
-    ready: mpsc::UnboundedSender<String>,
     log: Arc<Mutex<(File, usize)>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -366,17 +373,6 @@ fn read_output<T: tokio::io::AsyncRead + Unpin + Send + 'static>(
                 let _ = log.0.write_all(&bytes[..count]);
                 let _ = log.0.write_all(b"\n");
                 log.1 += count + 1;
-            }
-            for message in [
-                "Rust AUTH listener ready",
-                "Rust lobby listener ready",
-                "Rust STUN listener ready",
-                "experimental Rust game UDP endpoint ready",
-                "TCP listener ready",
-            ] {
-                if line.contains(message) {
-                    let _ = ready.send(message.into());
-                }
             }
         }
     })
@@ -439,7 +435,9 @@ fn backend_command(profile: &LocalProfile, output: &Path) -> Command {
         .arg("--native-bot-rooms")
         .arg("--continuous-play")
         .arg("--game-capture-every")
-        .arg("1000");
+        .arg("1000")
+        .arg("--launcher-ready-file")
+        .arg(output.join("backend-ready.json"));
     command
 }
 
@@ -453,46 +451,56 @@ fn resource_command(profile: &LocalProfile, output: &Path) -> Result<Command> {
     let path = output.join("resources.toml");
     std::fs::write(&path, config)?;
     let mut command = Command::new(&profile.backend.executable);
-    command.arg("observe").arg("--config").arg(path);
+    command
+        .arg("observe")
+        .arg("--config")
+        .arg(path)
+        .arg("--launcher-ready-file")
+        .arg(output.join("resources-ready.json"));
     Ok(command)
 }
 
 async fn wait_ready(
     services: &mut [Service],
-    messages: &mut mpsc::UnboundedReceiver<String>,
+    profile: &LocalProfile,
     stop: &mut watch::Receiver<bool>,
     timeout: u64,
 ) -> Result<()> {
-    let mut required: std::collections::HashSet<&str> = [
-        "Rust AUTH listener ready",
-        "Rust lobby listener ready",
-        "Rust STUN listener ready",
-        "experimental Rust game UDP endpoint ready",
-        "TCP listener ready",
-    ]
-    .into_iter()
-    .collect();
     let deadline = Instant::now() + Duration::from_secs(timeout);
-    while !required.is_empty() {
+    loop {
         ensure!(!*stop.borrow(), "启动已取消");
         for service in services.iter_mut() {
             ensure!(
                 service.child.try_wait()?.is_none(),
-                "本地服务端提前退出；查看 backend.log"
+                "本地服务端提前退出；查看 backend.log，旧版服务端须更新以支持 --launcher-ready-file"
             );
+            if !service.ready {
+                service.ready = native_readiness::verify(
+                    &service.ready_path,
+                    service.identity.pid,
+                    service.kind,
+                    profile,
+                )?;
+            }
+        }
+        if services.iter().all(|service| service.ready) {
+            return Ok(());
         }
         ensure!(
             Instant::now() < deadline,
             "等待本地服务端就绪超时；尚缺 {}",
-            required.into_iter().collect::<Vec<_>>().join(", ")
+            services
+                .iter()
+                .filter(|service| !service.ready)
+                .map(|service| service.ready_path.file_name().unwrap().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         tokio::select! {
             _ = stop.changed() => bail!("启动已取消"),
-            message = messages.recv() => { if let Some(message) = message { required.remove(message.as_str()); } },
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
         }
     }
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -550,7 +558,6 @@ pub async fn run(
     let changes = profile.changes()?;
     let mut journal = Journal::prepare(profile.root(), &profile.state_dir, &output, &changes)?;
     let log = Arc::new(Mutex::new((File::create(output.join("backend.log"))?, 0)));
-    let (sender, mut messages) = mpsc::unbounded_channel();
     let mut services = Vec::new();
     let mut wrapper: Option<Child> = None;
     let mut wrapper_pid = None;
@@ -561,13 +568,16 @@ pub async fn run(
         wine = crate::wine::Runtime::prepare(&profile.client, &output, &emit).await?;
         record.wine_runtime = wine.as_ref().map(|runtime| runtime.report.clone());
         emit("启动本地服务端，等待地图与网络端点就绪…");
-        for command in [backend_command(profile, &output), resource_command(profile, &output)?] {
-            let service = Service::spawn(command, sender.clone(), log.clone()).await?;
+        for (command, name, kind) in [
+            (backend_command(profile, &output), "backend-ready.json", Kind::NativeServices),
+            (resource_command(profile, &output)?, "resources-ready.json", Kind::Resources),
+        ] {
+            let service = Service::spawn(command, output.join(name), kind, log.clone()).await?;
             journal.processes.push(service.identity.clone());
             services.push(service);
             journal.save()?;
         }
-        wait_ready(&mut services, &mut messages, &mut stop, profile.startup_timeout_seconds).await?;
+        wait_ready(&mut services, profile, &mut stop, profile.startup_timeout_seconds).await?;
         record.backend_ready = true;
         ensure!(client_process(&profile.client.executable, profile.client.wine_prefix.as_deref()).is_none(), "等待期间客户端被其他程序启动");
         journal.apply(&changes)?;

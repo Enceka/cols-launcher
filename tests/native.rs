@@ -90,6 +90,7 @@ impl Fixture {
             "synthetic-client"
         });
         std::fs::copy(helper(), &binary).unwrap();
+        std::fs::write(base.join("client-sha256"), sha256(&binary).unwrap()).unwrap();
         std::fs::write(root.join("cacert.pem"), b"synthetic original trust roots\n").unwrap();
         std::fs::write(
             root.join("dwauth.ini"),
@@ -346,6 +347,63 @@ async fn verbose_native_output_is_drained_and_bounded_without_blocking_cleanup()
     let bytes = std::fs::read(output).unwrap();
     assert!(!bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024);
     assert!(String::from_utf8_lossy(&bytes).contains("native-output-drained"));
+}
+
+#[tokio::test]
+async fn incompatible_backend_readiness_never_launches_or_changes_client_config() {
+    for mode in [
+        "wrong-pid",
+        "wrong-version",
+        "wrong-endpoint",
+        "wrong-client",
+        "wrong-protocol",
+        "missing-maps",
+        "logs-only",
+    ] {
+        let fixture = Fixture::new();
+        std::fs::write(&fixture.profile.backend.game_state, mode).unwrap();
+        let before = inventory(&fixture.profile.client_profile()).unwrap();
+        let modified = fixture
+            .profile
+            .root()
+            .join("dwauth.ini")
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap();
+        let (_stop, receiver) = watch::channel(false);
+        let error = native::run(&fixture.profile, receiver, Arc::new(|_| {}))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        let expected = match mode {
+            "wrong-pid" => "不属于本次进程",
+            "wrong-version" => "契约版本不兼容",
+            "wrong-endpoint" => "就绪地址",
+            "wrong-client" => "基线不匹配",
+            "wrong-protocol" => "协议版本不兼容",
+            "missing-maps" => "地图和 Bot 房间装配",
+            _ => "就绪超时",
+        };
+        assert!(message.contains(expected), "{mode}: {message}");
+        assert!(!fixture.marker.exists());
+        assert_eq!(
+            before,
+            inventory(&fixture.profile.client_profile()).unwrap()
+        );
+        assert_eq!(
+            modified,
+            fixture
+                .profile
+                .root()
+                .join("dwauth.ini")
+                .metadata()
+                .unwrap()
+                .modified()
+                .unwrap()
+        );
+        assert!(!journal_path(&fixture.profile.state_dir, fixture.profile.root()).exists());
+    }
 }
 
 #[tokio::test]

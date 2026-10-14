@@ -40,7 +40,9 @@ target/release/cols-launcher native-launch
 
 `native-init` 生成 `profiles/native.local.json`，不覆盖已有配置；路径指向指定工作区。在 macOS 上会读取已有 GameHub Wine10 安装信息和现有游玩 prefix，不安装或重建运行环境。Windows 直接启动 EXE，服务端路径须对应自己的 Windows 构建；其它 Wine 环境可在 JSON 中配置。GUI 的“生成本机配置”提供同样操作。
 
-`native-plan` 只检查文件、基线、服务资料和原生进程占用；不启动服务、不连接网络、不修改客户端。如果已有游戏运行，会明确拒绝再次启动。`native-launch` 管理本次 AUTH、LOBBY、STUN、游戏 UDP 和 IIPS 资源观察端点；等到服务端报告地图与各端点就绪才临时配置并启动原生程序。
+`native-plan` 只检查文件、基线、服务资料和原生进程占用；不启动服务、不连接网络、不修改客户端。如果已有游戏运行，会明确拒绝再次启动。`native-launch` 管理本次 AUTH、LOBBY、STUN、游戏 UDP 和 IIPS 资源观察端点；等到服务端的本次就绪记录通过校验才临时配置并启动原生程序。
+
+服务端须支持 `serve-auth` 和 `observe` 的 `--launcher-ready-file` 选项。就绪契约版本1核对进程PID、客户端SHA-256、大厅210/游戏UDP v3、实际监听地址、地图准备、Bot房间及连续游玩状态。日志格式不参与判断；旧服务端或不匹配的记录会在临时配置写入前被拒绝。接口与业务归属见 [docs/SERVER_INTERFACE.md](docs/SERVER_INTERFACE.md)。升级时请同时重建服务端和启动器；已有本机JSON配置继续可用。
 
 macOS 上先检查 Wine 是否能执行基础命令。若通信锁确由当前用户已进入退出状态、RSS 为零的旧 wineserver 持有，会保留并隔离旧通信目录，再尝试一次；活动进程或内核 I/O 等待不会被当成失效锁处理。对标记匹配的项目专用 prefix，退出时核实 wineserver 身份并执行限定该 prefix 的关闭，管理命令和进程等待都有超时。诊断与恢复边界见 [docs/WINE_RECOVERY.md](docs/WINE_RECOVERY.md)。
 
