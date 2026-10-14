@@ -12,6 +12,7 @@
     "certificate": "../../server/.tools/tls-lab/server.pem",
     "private_key": "../../server/.tools/tls-lab/key.pem",
     "service_data_dir": "../../server/client-work/server-data",
+    "player_template": "../../server/client-work/server-data/new-player-template.json",
     "game_state": "../../server/research-output/tdm-afghan-hud-state.json",
     "map_catalog": "../../server/research-output/native-tdm-map-catalog.json",
     "title_id": 1002,

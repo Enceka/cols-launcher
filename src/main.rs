@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use cols_launcher::{inspection, native, profile::Profile, relay::RelayGroup, session};
 use std::path::PathBuf;
@@ -13,6 +13,7 @@ enum Action {
     Relay,
     Gui,
     NativeInit,
+    NativeCreatePlayer,
     NativePlan,
     NativeLaunch,
     NativeRecover,
@@ -38,6 +39,12 @@ struct Cli {
     lobby_port: Option<u16>,
     #[arg(long, help = "本机原生验证的可选运行时限，默认运行到游戏退出", value_parser = clap::value_parser!(u64).range(1..=3600))]
     seconds: Option<u64>,
+    #[arg(long, help = "新玩家昵称，可与其他玩家重名")]
+    nickname: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=70), help = "新玩家初始等级，默认 1")]
+    level: Option<u8>,
+    #[arg(long, help = "新玩家授予全部物品")]
+    unlock_all: bool,
 }
 
 async fn interrupted() -> Result<()> {
@@ -58,11 +65,25 @@ fn run() -> Result<bool> {
         cli.seconds.is_none() || matches!(cli.action, Action::NativeLaunch),
         "--seconds 仅用于 native-launch"
     );
+    anyhow::ensure!(
+        matches!(cli.action, Action::NativeCreatePlayer)
+            || (cli.nickname.is_none() && cli.level.is_none() && !cli.unlock_all),
+        "玩家创建参数仅用于 native-create-player"
+    );
     let native_mode = matches!(
         cli.action,
-        Action::NativeInit | Action::NativePlan | Action::NativeLaunch | Action::NativeRecover
+        Action::NativeInit
+            | Action::NativeCreatePlayer
+            | Action::NativePlan
+            | Action::NativeLaunch
+            | Action::NativeRecover
     );
     let config = cli.config.unwrap_or_else(|| {
+        if matches!(cli.action, Action::Gui) {
+            return cols_launcher::player::last_config(std::path::Path::new(
+                "profiles/native.local.json",
+            ));
+        }
         PathBuf::from(if native_mode || matches!(cli.action, Action::Gui) {
             "profiles/native.local.json"
         } else {
@@ -89,6 +110,21 @@ fn run() -> Result<bool> {
             "本地原生模式使用配置中的回环端点；远端选项用于转发模式"
         );
         let profile = native::LocalProfile::load(&config)?;
+        if matches!(cli.action, Action::NativeCreatePlayer) {
+            let settings = cols_launcher::player::PlayerSettings {
+                nickname: cli
+                    .nickname
+                    .context("创建玩家需要 --nickname")?
+                    .trim()
+                    .into(),
+                level: cli.level.unwrap_or(1),
+                unlock_all: cli.unlock_all,
+            };
+            let path = tokio::runtime::Runtime::new()?
+                .block_on(cols_launcher::player::create(&profile, settings))?;
+            println!("已创建玩家配置：{}", path.display());
+            return Ok(true);
+        }
         if matches!(cli.action, Action::NativePlan) {
             let report = native::plan(&profile)?;
             println!("{}", serde_json::to_string_pretty(&report)?);

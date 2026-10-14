@@ -146,6 +146,7 @@ impl Fixture {
                 certificate,
                 private_key,
                 service_data_dir,
+                player_template: None,
                 game_state,
                 map_catalog,
                 title_id: 1002,
@@ -158,6 +159,7 @@ impl Fixture {
                 resource_port: free_tcp(),
             },
             state_dir: state,
+            player: None,
             startup_timeout_seconds: 2,
             client_startup_timeout_seconds: 2,
             trace_wine_files: false,
@@ -176,6 +178,60 @@ impl Fixture {
         std::fs::create_dir(&output).unwrap();
         output
     }
+}
+
+#[tokio::test]
+async fn player_creation_persists_settings_and_switches_to_an_independent_root() {
+    let mut fixture = Fixture::new();
+    let template = fixture
+        .profile
+        .backend
+        .service_data_dir
+        .join("new-player-template.json");
+    std::fs::write(&template, b"synthetic template").unwrap();
+    let source = fixture.profile.backend.service_data_dir.clone();
+    let before_config = std::fs::read(&fixture.profile.source).unwrap();
+    let before_client = inventory(&fixture.profile.client_profile()).unwrap();
+    let settings = cols_launcher::player::PlayerSettings {
+        nickname: "同名玩家".into(),
+        level: 37,
+        unlock_all: true,
+    };
+    let config = cols_launcher::player::create(&fixture.profile, settings.clone())
+        .await
+        .unwrap();
+    let player = LocalProfile::load(&config).unwrap();
+    assert_eq!(player.player, Some(settings));
+    assert_ne!(player.backend.service_data_dir, source);
+    assert!(native::plan(&player).unwrap().launch_allowed);
+    assert_eq!(player.backend.player_template, Some(template));
+    let arguments =
+        std::fs::read_to_string(config.parent().unwrap().join("creation-arguments")).unwrap();
+    assert!(arguments.contains("--level\n37"));
+    assert!(arguments.contains("--nickname\n同名玩家"));
+    assert!(arguments.contains("--unlock-all"));
+    assert_eq!(
+        std::fs::read(&fixture.profile.source).unwrap(),
+        before_config
+    );
+    assert_eq!(
+        inventory(&fixture.profile.client_profile()).unwrap(),
+        before_client
+    );
+    let (_stop, receiver) = watch::channel(false);
+    native::run(&player, receiver, Arc::new(|_| {}))
+        .await
+        .unwrap();
+    assert_eq!(
+        LocalProfile::load(&config).unwrap().player.unwrap().level,
+        37
+    );
+    fixture.profile.backend.player_template = Some(source.join("missing-template"));
+    assert!(
+        cols_launcher::player::create(&fixture.profile, Default::default())
+            .await
+            .is_err()
+    );
 }
 
 #[test]

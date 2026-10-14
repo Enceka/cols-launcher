@@ -50,6 +50,21 @@ macOS 上先检查 Wine 是否能执行基础命令。若通信锁确由当前�
 
 按原生入口进入：玩 → 多人竞技 → 创建房间 → 战术团队竞技，选择已准备地图并准备，服务端模拟的 Bot 加入。本机使用现有账号资料，地图和玩法范围由服务端准备决定。
 
+GUI 的“新玩家配置”支持昵称、初始等级 1～70 和“全物品解锁”，默认 1 级、初始装备。点击“新建玩家并切换”后，服务端创建随机玩家 ID 对应的独立目录，启动器保存新的原生配置并切换过去。昵称可以重名；玩家列表用独立标识区分同名记录，并记住上次选择。显式 `gui --config` 仍优先使用指定配置。
+
+等级和物品授予只在新建时执行。再次启动读取已有存档，保留后续进度；修改创建表单会创建另一位玩家。新账号钱包为零，人物级内经验为零，不继承原账号的购买、战绩或结算回执。“全物品解锁”授予本版完整物品表的所有权，人物等级独立设置，武器等级及其它剧情／界面门槛仍按其规则处理。
+
+```sh
+target/release/cols-launcher native-create-player \
+  --config profiles/native.local.json --nickname "玩家一" --level 20 --unlock-all
+# 使用命令输出的新配置路径：
+target/release/cols-launcher native-launch --config /path/to/player/native.json
+```
+
+新玩家需要外部准备的 `new-player-template.json`：包含经过本版 schema／CRC／投影校验的初始公共档案、原生 UID、初始装备和完整物品 ID 列表。配置可用 `backend.player_template` 指定；旧配置默认查找 `service_data_dir/new-player-template.json`。模板生成方法见服务端 `docs/LOCAL_PLAYER.md`，模板及账号数据不打包进仓库。运行启动器和创建玩家不依赖 Python。
+
+每位玩家的配置、资料与会话状态位于原配置的 `state_dir/players/<player_id>/`；新配置中的 `backend.service_data_dir` 指向其中的 `server-data`。GUI 列表及上次选择保存在启动器工作目录的 `state/players.json`。该流程用于本地玩家配置；联网身份分配及便携存档同步尚未接入。
+
 异常中断后：
 
 ```sh

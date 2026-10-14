@@ -26,6 +26,8 @@ pub struct Backend {
     pub certificate: PathBuf,
     pub private_key: PathBuf,
     pub service_data_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_template: Option<PathBuf>,
     pub game_state: PathBuf,
     pub map_catalog: PathBuf,
     pub title_id: u32,
@@ -44,6 +46,8 @@ pub struct LocalProfile {
     pub version: u32,
     pub client: Client,
     pub backend: Backend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player: Option<crate::player::PlayerSettings>,
     pub state_dir: PathBuf,
     pub startup_timeout_seconds: u64,
     pub client_startup_timeout_seconds: u64,
@@ -84,14 +88,24 @@ impl LocalProfile {
         ] {
             *path = resolve(path, base)?;
         }
+        value.backend.player_template = value
+            .backend
+            .player_template
+            .as_deref()
+            .map(|path| resolve(path, base))
+            .transpose()?;
         value.validate()?;
         Ok(value)
     }
 
     pub fn client_profile(&self) -> Profile {
+        let mut client = self.client.clone();
+        if let Some(player) = &self.player {
+            client.arguments = player.client_arguments(&client.arguments);
+        }
         Profile {
             version: self.version,
-            client: self.client.clone(),
+            client,
             routing: Routing::Direct,
             routes: Vec::new(),
             state_dir: self.state_dir.clone(),
@@ -110,6 +124,9 @@ impl LocalProfile {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(player) = &self.player {
+            player.validate()?;
+        }
         self.client_profile().validate()?;
         ensure!(
             self.client.sha256.is_some(),
@@ -154,6 +171,12 @@ impl LocalProfile {
             ensure!(
                 !resolve(path, self.root())?.starts_with(self.root()),
                 "本地服务端文件和资料必须位于客户端目录之外"
+            );
+        }
+        if let Some(path) = &self.backend.player_template {
+            ensure!(
+                !resolve(path, self.root())?.starts_with(self.root()),
+                "初始玩家资料必须位于客户端目录之外"
             );
         }
         Ok(())
@@ -585,7 +608,8 @@ pub async fn run(
         let client = &profile.client;
         let mut command = Command::new(client.runner.as_ref().unwrap_or(&client.executable));
         if client.runner.is_some() { command.arg(&client.executable); }
-        command.args(&client.arguments).current_dir(profile.root()).kill_on_drop(true).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let arguments = profile.player.as_ref().map_or_else(|| client.arguments.clone(), |player| player.client_arguments(&client.arguments));
+        command.args(arguments).current_dir(profile.root()).kill_on_drop(true).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(prefix) = &client.wine_prefix {
             command.env("WINEPREFIX", prefix).env("WINEDEBUG", if profile.trace_wine_files { "-all,err+all,+timestamp,+file" } else { "-all,err+all" });
         }
@@ -743,6 +767,12 @@ pub fn initialize(path: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
     // not the source directory used to build this binary.
     let base_directory = workspace.join("launcher/profiles");
     let base = base_directory.as_path();
+    profile.backend.player_template = profile
+        .backend
+        .player_template
+        .as_deref()
+        .map(|path| resolve(path, base))
+        .transpose()?;
     for target in [
         &mut profile.client.executable,
         &mut profile.state_dir,

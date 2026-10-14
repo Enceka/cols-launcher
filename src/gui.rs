@@ -13,6 +13,7 @@ use tokio::sync::watch;
 enum Message {
     Log(String),
     Finished(Result<(), String>),
+    PlayerCreated(Result<PathBuf, String>),
 }
 
 struct App {
@@ -22,6 +23,9 @@ struct App {
     auth_port: String,
     lobby_port: String,
     native_mode: bool,
+    player: crate::player::PlayerSettings,
+    loaded_player_config: String,
+    saved_players: Vec<crate::player::SavedPlayer>,
     status: String,
     report: String,
     log: String,
@@ -65,13 +69,28 @@ impl App {
             }
         }
         let (sender, receiver) = mpsc::channel();
+        let player = crate::player::load_settings(&path);
+        let mut saved_players = crate::player::saved_players();
+        if let Ok(config) = path.canonicalize()
+            && LocalProfile::load(&config).is_ok()
+            && !saved_players.iter().any(|player| player.config == config)
+        {
+            saved_players.push(crate::player::SavedPlayer {
+                nickname: "当前账号".into(),
+                config,
+            });
+        }
         Self {
             config: path.display().to_string(),
             executable: String::new(),
             server: server.unwrap_or_default(),
             auth_port: auth_port.map(|p| p.to_string()).unwrap_or_default(),
             lobby_port: lobby_port.map(|p| p.to_string()).unwrap_or_default(),
-            native_mode: path.to_string_lossy().contains("native"),
+            native_mode: LocalProfile::load(&path).is_ok()
+                || path.to_string_lossy().contains("native"),
+            player,
+            loaded_player_config: path.display().to_string(),
+            saved_players,
             status: "先检查配置与客户端。".into(),
             report: String::new(),
             log: String::new(),
@@ -241,6 +260,39 @@ impl App {
             ));
         }));
     }
+
+    fn create_player(&mut self) {
+        let settings = crate::player::PlayerSettings {
+            nickname: self.player.nickname.trim().into(),
+            ..self.player.clone()
+        };
+        let profile = match settings.validate().and_then(|()| self.local_profile()) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.status = format!("{error:#}");
+                return;
+            }
+        };
+        let (stop, mut receiver) = watch::channel(false);
+        self.stop = Some(stop);
+        self.status = "正在创建独立玩家存档…".into();
+        let sender = self.sender.clone();
+        self.worker = Some(std::thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        tokio::select! {
+                            result = crate::player::create(&profile, settings) => result,
+                            _ = receiver.changed() => anyhow::bail!("创建玩家已取消"),
+                        }
+                    })
+                });
+            let _ = sender.send(Message::PlayerCreated(
+                result.map_err(|error| format!("{error:#}")),
+            ));
+        }));
+    }
 }
 
 impl eframe::App for App {
@@ -262,9 +314,37 @@ impl eframe::App for App {
                         let _ = worker.join();
                     }
                 }
+                Message::PlayerCreated(result) => {
+                    self.stop = None;
+                    if let Some(worker) = self.worker.take() {
+                        let _ = worker.join();
+                    }
+                    match result {
+                        Ok(path) => {
+                            let previous = PathBuf::from(&self.config);
+                            let remembered = crate::player::remember(&previous)
+                                .and_then(|()| crate::player::remember(&path));
+                            self.config = path.display().to_string();
+                            self.player = crate::player::load_settings(&path);
+                            self.loaded_player_config = self.config.clone();
+                            self.status =
+                                format!("已创建玩家 {}，已切换到独立存档。", self.player.nickname);
+                            if let Err(error) = remembered {
+                                self.status.push_str(&format!(" 记住选择失败：{error:#}"));
+                            }
+                            self.saved_players = crate::player::saved_players();
+                            self.report.clear();
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
             }
         }
         let running = self.stop.is_some();
+        if !running && self.native_mode && self.loaded_player_config != self.config {
+            self.player = crate::player::load_settings(&PathBuf::from(&self.config));
+            self.loaded_player_config = self.config.clone();
+        }
         if !running {
             let dropped = context.input(|input| input.raw.dropped_files.clone());
             for file in dropped {
@@ -286,7 +366,7 @@ impl eframe::App for App {
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal(|ui| {
                     if ui.selectable_value(&mut self.native_mode, true, "本机原生游戏").changed() {
-                        self.config = "profiles/native.local.json".into(); self.executable.clear();
+                        self.config = crate::player::last_config(std::path::Path::new("profiles/native.local.json")).display().to_string(); self.executable.clear();
                     }
                     if ui.selectable_value(&mut self.native_mode, false, "连接转发").changed() {
                         self.config = "profiles/multiplayer.example.json".into(); self.executable.clear();
@@ -304,6 +384,26 @@ impl eframe::App for App {
                 ui.label("客户端路径（可拖入原生可执行文件）");
                 ui.text_edit_singleline(&mut self.executable);
                 if self.native_mode {
+                    if !self.saved_players.is_empty() {
+                        let current_path = PathBuf::from(&self.config).canonicalize().unwrap_or_else(|_| PathBuf::from(&self.config));
+                        let current = self.saved_players.iter().find(|player| player.config == current_path)
+                            .map_or("选择玩家", |player| player.nickname.as_str()).to_owned();
+                        egui::ComboBox::from_id_salt("saved-local-player").selected_text(current).show_ui(ui, |ui| {
+                            for player in &self.saved_players {
+                                let label = if self.saved_players.iter().filter(|entry| entry.nickname == player.nickname).count() > 1 {
+                                    let id = player.config.parent().and_then(|path| path.file_name()).and_then(|name| name.to_str()).unwrap_or("原有账号");
+                                    format!("{} · {}", player.nickname, &id[..id.char_indices().nth(8).map_or(id.len(), |(i,_)| i)])
+                                } else { player.nickname.clone() };
+                                if ui.selectable_label(player.config == current_path, label).clicked() {
+                                    self.config = player.config.display().to_string();
+                                    self.executable.clear();
+                                    self.player = crate::player::load_settings(&player.config);
+                                    self.loaded_player_config = self.config.clone();
+                                    if let Err(error) = crate::player::remember(&player.config) { self.status = format!("{error:#}"); }
+                                }
+                            }
+                        });
+                    }
                     ui.label("本机使用配置中的回环地址。连接 INI 和本地 CA 会临时调整，EXE/DLL/游戏资源不变。");
                     if ui.button("生成本机配置").clicked() {
                         match native::initialize(&PathBuf::from(&self.config), None) {
@@ -311,6 +411,24 @@ impl eframe::App for App {
                             Err(error) => self.status = format!("{error:#}"),
                         }
                     }
+                    ui.add_space(8.0);
+                    ui.group(|ui| {
+                        ui.label("新玩家配置");
+                        ui.horizontal(|ui| {
+                            ui.label("昵称");
+                            ui.add(egui::TextEdit::singleline(&mut self.player.nickname).desired_width(220.0));
+                            ui.label("初始等级");
+                            ui.add(egui::DragValue::new(&mut self.player.level).range(1..=70));
+                            ui.checkbox(&mut self.player.unlock_all, "全物品解锁");
+                        });
+                        ui.label("昵称可重名；新玩家使用独立存档。等级与解锁仅在创建时生效。");
+                        if ui.button("新建玩家并切换").clicked() { self.create_player(); }
+                        if let Ok(profile) = LocalProfile::load(&PathBuf::from(&self.config))
+                            && let Some(player) = profile.player {
+                            ui.label(format!("当前玩家：{} · 初始等级 {} · {}", player.nickname, player.level,
+                                if player.unlock_all { "全物品" } else { "初始装备" }));
+                        }
+                    });
                 } else {
                 ui.label("联机服务器 IP / 域名（留空沿用配置）");
                 ui.add(

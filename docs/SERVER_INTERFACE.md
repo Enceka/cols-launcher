@@ -2,6 +2,10 @@
 
 启动器与服务端的边界为可执行程序、CLI参数和外部会话记录，不导入服务端内部模块。服务端的业务、玩法和接入目录调整不要求重写原生客户端RPC；原生协议仍由游戏直接与服务端交互。
 
+玩家创建使用 `create-local-player --source-data-dir --template --output-parent --title-id --nickname --level [--unlock-all]`。服务端验证外部初始模板，生成新的随机玩家目录，完整提交后在 stdout 返回 `{"player_directory":"..."}`。启动器验证返回目录属于本次父目录，保存独立的 `native.json`。昵称、等级和解锁选项存入 `player` 配置；等级和所有权仅创建时写入，启动期间不重新初始化账号。旧配置没有 `player` 时维持已有账号行为。
+
+账号目录中的 `player.json` 绑定 title／原生 UID、随机玩家 ID 和初始设置。服务端将昵称编码进认证票据并用于身份验证后的对局显示；启动器也通过原生 `name`／`dw_username` 启动参数提供昵称。多位本地玩家可以使用同一原生 UID，但必须使用独立服务数据根目录；这不等于多人联机已具备独立原生 UID。
+
 本地配置继续使用同一个 `service_data_dir`、title_id、默认地图状态和地图目录。服务端通过共享账号存储组合档案、库存、购买、玩家文件和publisher业务。大厅负责认证会话、RPC顺序和异步房间投递；房间业务负责成员、准备和游戏准入；游戏UDP接入负责校验、资源装配和玩法桥接。启动器只管理进程、临时INI/CA和恢复，不复刻账号或房间业务。
 
 `native-launch` 为 `serve-auth` 和 IIPS观察进程分别传入 `--launcher-ready-file`，使用本次新建的输出目录。服务端完成装配后原子写入 `backend-ready.json` / `resources-ready.json`。启动器要求记录版本1、对应的本次进程PID和客户端SHA-256；主服务另外校验大厅210、游戏UDP v3、title_id、AUTH/大厅/两处STUN/游戏的实际地址、已加载默认地图与目录、Bot房间和连续游玩。资源记录要求唯一的 `resources` 监听与IIPS配置一致。

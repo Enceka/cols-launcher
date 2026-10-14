@@ -25,6 +25,20 @@ fn main() {
         return;
     };
     match action.as_str() {
+        "create-local-player" => {
+            let parent = std::path::PathBuf::from(option(&arguments, "--output-parent"));
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let directory = parent.join(format!("{nonce:032x}"));
+            let data = directory.join("server-data");
+            std::fs::create_dir_all(data.join("publisher")).unwrap();
+            let source = std::path::PathBuf::from(option(&arguments, "--source-data-dir"));
+            for name in ["configs_s.info", "mp_playlists_shipRetail_release.info"] {
+                std::fs::copy(source.join("publisher").join(name), data.join("publisher").join(name)).unwrap();
+            }
+            std::fs::write(directory.join("creation-arguments"), arguments.join("\n")).unwrap();
+            // Temp test paths contain no JSON control characters.
+            println!("{{\"player_directory\":\"{}\"}}", directory.display());
+        }
         "fixture-client" => {
             if arguments.get(3).is_some_and(|value| value == "noisy") {
                 use std::io::Write;
@@ -79,7 +93,8 @@ fn main() {
                 .trim_matches('"');
             let _listener = TcpListener::bind(address).unwrap();
             println!("TCP listener ready");
-            let digest = std::fs::read_to_string(config_path.parent().unwrap().parent().unwrap().parent().unwrap().join("client-sha256")).unwrap();
+            let digest_path = config_path.ancestors().map(|path| path.join("client-sha256")).find(|path| path.is_file()).unwrap();
+            let digest = std::fs::read_to_string(digest_path).unwrap();
             publish_ready(&arguments, &format!("\"kind\":\"tcp_observer\",\"listeners\":{{\"resources\":\"{address}\"}}"), &digest, "ready");
             std::thread::sleep(Duration::from_secs(60));
         }
