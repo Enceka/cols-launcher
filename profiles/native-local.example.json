@@ -25,6 +25,6 @@
     "resource_port": 39003
   },
   "state_dir": "../state/native",
-  "startup_timeout_seconds": 180,
+  "startup_timeout_seconds": 240,
   "client_startup_timeout_seconds": 90
 }
