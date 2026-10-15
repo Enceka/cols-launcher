@@ -12,6 +12,9 @@ pub struct PlayerSettings {
     pub nickname: String,
     pub level: u8,
     pub unlock_all: bool,
+    /// Stable native login handle; independent of the visible nickname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_name: Option<String>,
 }
 impl Default for PlayerSettings {
     fn default() -> Self {
@@ -19,6 +22,7 @@ impl Default for PlayerSettings {
             nickname: "Player".into(),
             level: 1,
             unlock_all: false,
+            login_name: None,
         }
     }
 }
@@ -35,6 +39,12 @@ impl PlayerSettings {
             "昵称需为 1～31 个 UTF-8 字节，不能包含控制字符、引号、反斜杠、分号或颜色代码"
         );
         ensure!((1..=70).contains(&self.level), "初始等级需为 1～70");
+        ensure!(
+            self.login_name.as_ref().is_none_or(|name| !name.is_empty()
+                && name.len() <= 15
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')),
+            "本地登录标识需为 1～15 个字母、数字或下划线"
+        );
         Ok(())
     }
     pub fn client_arguments(&self, original: &[String]) -> Vec<String> {
@@ -53,8 +63,9 @@ impl PlayerSettings {
             }
         }
         let name = STANDARD.encode(&self.nickname);
-        for variable in ["name", "dw_username"] {
-            arguments.extend(["+set".into(), variable.into(), name.clone()]);
+        arguments.extend(["+set".into(), "name".into(), name]);
+        if let Some(login) = &self.login_name {
+            arguments.extend(["+set".into(), "dw_username".into(), login.clone()]);
         }
         arguments
     }
@@ -69,7 +80,7 @@ pub fn template(profile: &LocalProfile) -> PathBuf {
     })
 }
 
-pub async fn create(profile: &LocalProfile, settings: PlayerSettings) -> Result<PathBuf> {
+pub async fn create(profile: &LocalProfile, mut settings: PlayerSettings) -> Result<PathBuf> {
     profile.validate()?;
     settings.validate()?;
     let report = crate::native::plan(profile)?;
@@ -127,6 +138,8 @@ pub async fn create(profile: &LocalProfile, settings: PlayerSettings) -> Result<
     ensure!(directory.parent() == Some(parent.as_path()) && directory.file_name().and_then(|name| name.to_str())
         .is_some_and(|name| name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit())), "服务端返回了无效的玩家目录");
     let mut configured = profile.clone();
+    let id = directory.file_name().unwrap().to_str().unwrap();
+    settings.login_name = Some(format!("c{}", &id[..14]));
     configured.backend.service_data_dir = directory.join("server-data");
     configured.backend.player_template = Some(template.canonicalize()?);
     configured.state_dir = directory.join("state");
@@ -229,6 +242,7 @@ mod tests {
     fn names_allow_duplicates_and_unicode_but_cannot_change_command_structure() {
         let mut settings = PlayerSettings {
             nickname: "同名玩家".into(),
+            login_name: Some("c123456789abcde".into()),
             ..Default::default()
         };
         settings.validate().unwrap();
@@ -252,7 +266,7 @@ mod tests {
             STANDARD.decode(&arguments[5]).unwrap(),
             "同名玩家".as_bytes()
         );
-        assert_eq!(arguments[5], arguments[8]);
+        assert_eq!(arguments[8], "c123456789abcde");
         for name in [
             "", "   ", "a\nb", "\"bad", "a\\b", "a;b", "^1bad", " leading",
         ] {

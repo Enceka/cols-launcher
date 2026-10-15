@@ -149,6 +149,7 @@ impl Fixture {
                 player_template: None,
                 game_state,
                 map_catalog,
+                room_bot_fill: 12,
                 title_id: 1002,
                 ip: Ipv4Addr::LOCALHOST,
                 auth_port: free_tcp(),
@@ -196,12 +197,22 @@ async fn player_creation_persists_settings_and_switches_to_an_independent_root()
         nickname: "同名玩家".into(),
         level: 37,
         unlock_all: true,
+        login_name: None,
     };
     let config = cols_launcher::player::create(&fixture.profile, settings.clone())
         .await
         .unwrap();
     let player = LocalProfile::load(&config).unwrap();
-    assert_eq!(player.player, Some(settings));
+    let configured = player.player.as_ref().unwrap();
+    assert_eq!(configured.nickname, settings.nickname);
+    assert_eq!(configured.level, settings.level);
+    assert_eq!(configured.unlock_all, settings.unlock_all);
+    assert!(
+        configured
+            .login_name
+            .as_ref()
+            .is_some_and(|name| name.len() == 15)
+    );
     assert_ne!(player.backend.service_data_dir, source);
     assert!(native::plan(&player).unwrap().launch_allowed);
     assert_eq!(player.backend.player_template, Some(template));

@@ -30,6 +30,9 @@ pub struct Backend {
     pub player_template: Option<PathBuf>,
     pub game_state: PathBuf,
     pub map_catalog: PathBuf,
+    /// Population of supported custom TDM rooms, including replaceable Bots.
+    #[serde(default = "default_bot_fill")]
+    pub room_bot_fill: u8,
     pub title_id: u32,
     pub ip: Ipv4Addr,
     pub auth_port: u16,
@@ -38,6 +41,10 @@ pub struct Backend {
     pub stun_alt_port: u16,
     pub game_port: u16,
     pub resource_port: u16,
+}
+
+fn default_bot_fill() -> u8 {
+    12
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -142,6 +149,10 @@ impl LocalProfile {
             "启动超时范围无效"
         );
         ensure!(self.backend.title_id != 0, "本地 title_id 不能为零");
+        ensure!(
+            (4..=12).contains(&self.backend.room_bot_fill),
+            "Bot 补齐人数需为 4～12"
+        );
         let backend = &self.backend;
         let tcp = [backend.auth_port, backend.lobby_port, backend.resource_port];
         let udp = [backend.stun_port, backend.stun_alt_port, backend.game_port];
@@ -455,7 +466,8 @@ fn backend_command(profile: &LocalProfile, output: &Path) -> Command {
         .arg(&backend.game_state)
         .arg("--game-map-catalog")
         .arg(&backend.map_catalog)
-        .arg("--native-bot-rooms")
+        .arg("--room-bot-fill")
+        .arg(backend.room_bot_fill.to_string())
         .arg("--continuous-play")
         .arg("--game-capture-every")
         .arg("1000")

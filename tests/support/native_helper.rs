@@ -76,7 +76,7 @@ fn main() {
                 let protocol = if mode == "wrong-protocol" { 4 } else { 3 };
                 let loaded = mode != "missing-maps";
                 let body = format!(
-                    "\"kind\":\"native_services\",\"lobby_protocol\":210,\"game_protocol\":{protocol},\"title_id\":{},\"auth\":\"{}\",\"lobby\":\"{}\",\"stun\":\"{}\",\"stun_alt\":\"{}\",\"game\":\"{}\",\"continuous_play\":true,\"native_bot_rooms\":true,\"game_state_loaded\":true,\"map_catalog_loaded\":{loaded}",
+                    "\"kind\":\"native_services\",\"lobby_protocol\":210,\"game_protocol\":{protocol},\"title_id\":{},\"auth\":\"{}\",\"lobby\":\"{}\",\"stun\":\"{}\",\"stun_alt\":\"{}\",\"game\":\"{}\",\"continuous_play\":true,\"native_bot_rooms\":false,\"room_bot_fill\":12,\"game_state_loaded\":true,\"map_catalog_loaded\":{loaded}",
                     option(&arguments,"--local-title-id"),option(&arguments,"--bind"),option(&arguments,"--lobby-bind"),option(&arguments,"--stun-bind"),option(&arguments,"--stun-alt"),game
                 );
                 publish_ready(&arguments, &body, &digest, &mode);

@@ -119,6 +119,7 @@ fn run() -> Result<bool> {
                     .into(),
                 level: cli.level.unwrap_or(1),
                 unlock_all: cli.unlock_all,
+                login_name: None,
             };
             let path = tokio::runtime::Runtime::new()?
                 .block_on(cols_launcher::player::create(&profile, settings))?;

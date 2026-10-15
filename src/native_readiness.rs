@@ -35,7 +35,8 @@ enum Service {
         stun_alt: SocketAddr,
         game: SocketAddr,
         continuous_play: bool,
-        native_bot_rooms: bool,
+        #[serde(default)]
+        room_bot_fill: Option<u8>,
         game_state_loaded: bool,
         map_catalog_loaded: bool,
     },
@@ -82,7 +83,7 @@ pub(crate) fn verify(path: &Path, pid: u32, kind: Kind, profile: &LocalProfile) 
                 stun_alt,
                 game,
                 continuous_play,
-                native_bot_rooms,
+                room_bot_fill,
                 game_state_loaded,
                 map_catalog_loaded,
             },
@@ -108,7 +109,10 @@ pub(crate) fn verify(path: &Path, pid: u32, kind: Kind, profile: &LocalProfile) 
                 );
             }
             ensure!(
-                continuous_play && native_bot_rooms && game_state_loaded && map_catalog_loaded,
+                continuous_play
+                    && room_bot_fill == Some(profile.backend.room_bot_fill)
+                    && game_state_loaded
+                    && map_catalog_loaded,
                 "服务端没有完成本地连续对局、地图和 Bot 房间装配"
             );
         }
