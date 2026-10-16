@@ -22,6 +22,7 @@ struct App {
     server: String,
     auth_port: String,
     lobby_port: String,
+    show_free_notice: bool,
     native_mode: bool,
     player: crate::player::PlayerSettings,
     loaded_player_config: String,
@@ -86,6 +87,7 @@ impl App {
             server: server.unwrap_or_default(),
             auth_port: auth_port.map(|p| p.to_string()).unwrap_or_default(),
             lobby_port: lobby_port.map(|p| p.to_string()).unwrap_or_default(),
+            show_free_notice: true,
             native_mode: LocalProfile::load(&path).is_ok()
                 || path.to_string_lossy().contains("native"),
             player,
@@ -345,7 +347,7 @@ impl eframe::App for App {
             self.player = crate::player::load_settings(&PathBuf::from(&self.config));
             self.loaded_player_config = self.config.clone();
         }
-        if !running {
+        if !running && !self.show_free_notice {
             let dropped = context.input(|input| input.raw.dropped_files.clone());
             for file in dropped {
                 if let Some(path) = file.path {
@@ -362,7 +364,15 @@ impl eframe::App for App {
             }
         }
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("COLS启动器");
+            if self.show_free_notice {
+                ui.disable();
+            }
+            ui.horizontal(|ui| {
+                ui.heading("COLS启动器");
+                if ui.button("免费声明").clicked() {
+                    self.show_free_notice = true;
+                }
+            });
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal(|ui| {
                     if ui.selectable_value(&mut self.native_mode, true, "本机原生游戏").changed() {
@@ -510,6 +520,37 @@ impl eframe::App for App {
                     else { "外部请求拦截尚未实现；TCP 转发不改变 TLS 校验，也不转发游戏 UDP。" });
             });
         });
+        if self.show_free_notice {
+            let response = egui::Modal::new(egui::Id::new("free-resource-notice"))
+                .frame(egui::Frame::popup(&context.style()).inner_margin(24.0))
+                .show(context, |ui| {
+                    ui.set_width(400.0);
+                    ui.vertical_centered(|ui| {
+                        ui.heading("免费使用声明");
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new("本启动器及相关资源均免费提供。")
+                                .size(20.0)
+                                .strong()
+                                .color(ui.visuals().warn_fg_color),
+                        );
+                        ui.add_space(8.0);
+                        ui.label("本项目不收取下载、激活或使用费用。");
+                        ui.add_space(8.0);
+                        ui.label("如您通过付费渠道获取本启动器或相关资源，请及时申请退款，并向交易平台举报。");
+                        ui.add_space(16.0);
+                        ui.add_sized(
+                            [ui.available_width(), 36.0],
+                            egui::Button::new("已阅读并知悉"),
+                        )
+                        .clicked()
+                    })
+                    .inner
+                });
+            if response.inner {
+                self.show_free_notice = false;
+            }
+        }
         context.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
